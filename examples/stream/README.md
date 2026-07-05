@@ -43,6 +43,7 @@ brew install sdl2
 cmake -B build -DWHISPER_SDL2=ON
 cmake --build build --config Release
 
+./models/download-ggml-model.sh tiny.en
 ./build/bin/whisper-stream
 ```
 

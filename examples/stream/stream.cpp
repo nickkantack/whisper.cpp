@@ -126,38 +126,31 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
-    params.keep_ms   = std::min(params.keep_ms,   params.step_ms);
-    params.length_ms = std::max(params.length_ms, params.step_ms);
-
-    const int n_samples_step = (1e-3*params.step_ms  )*WHISPER_SAMPLE_RATE;
-    const int n_samples_len  = (1e-3*params.length_ms)*WHISPER_SAMPLE_RATE;
-    const int n_samples_keep = (1e-3*params.keep_ms  )*WHISPER_SAMPLE_RATE;
-    const int n_samples_30s  = (1e-3*30000.0         )*WHISPER_SAMPLE_RATE;
-
-    const bool use_vad = n_samples_step <= 0; // sliding window mode uses VAD
-
-    const int n_new_line = !use_vad ? std::max(1, params.length_ms / params.step_ms - 1) : 1; // number of steps to print new line
-
+    // Initialize some values that inform the whisper model of our
+    // use case.
+    const bool use_vad = true;
     params.no_timestamps  = !use_vad;
     params.no_context    |= use_vad;
     params.max_tokens     = 0;
 
     // init audio
 
+    /*
+    Define an audio buffer with a length matching length_ms. This
+    means audio.get allows us to request up to the last length_ms
+    of audio.
+    */
     audio_async audio(params.length_ms);
     if (!audio.init(params.capture_id, WHISPER_SAMPLE_RATE)) {
         fprintf(stderr, "%s: audio.init() failed!\n", __func__);
         return 1;
     }
 
+    // Start streaming audio to the buffer
     audio.resume();
 
     // whisper init
-    if (params.language != "auto" && whisper_lang_id(params.language.c_str()) == -1){
-        fprintf(stderr, "error: unknown language '%s'\n", params.language.c_str());
-        whisper_print_usage(argc, argv, params);
-        exit(0);
-    }
+    params.language = "en";
 
     struct whisper_context_params cparams = whisper_context_default_params();
 
@@ -170,147 +163,119 @@ int main(int argc, char ** argv) {
         return 2;
     }
 
-    std::vector<float> pcmf32    (n_samples_30s, 0.0f);
+    std::vector<float> pcmf32;
     std::vector<float> pcmf32_old;
-    std::vector<float> pcmf32_new(n_samples_30s, 0.0f);
+    std::vector<float> pcmf32_new;
 
+    // TODO could initialize with domain specific vocab
     std::vector<whisper_token> prompt_tokens;
 
-    // print some info about the processing
-    {
-        fprintf(stderr, "\n");
-        if (!whisper_is_multilingual(ctx)) {
-            if (params.language != "en" || params.translate) {
-                params.language = "en";
-                params.translate = false;
-                fprintf(stderr, "%s: WARNING: model is not multilingual, ignoring language and translation options\n", __func__);
-            }
-        }
-        fprintf(stderr, "%s: processing %d samples (step = %.1f sec / len = %.1f sec / keep = %.1f sec), %d threads, lang = %s, task = %s, timestamps = %d ...\n",
-                __func__,
-                n_samples_step,
-                float(n_samples_step)/WHISPER_SAMPLE_RATE,
-                float(n_samples_len )/WHISPER_SAMPLE_RATE,
-                float(n_samples_keep)/WHISPER_SAMPLE_RATE,
-                params.n_threads,
-                params.language.c_str(),
-                params.translate ? "translate" : "transcribe",
-                params.no_timestamps ? 0 : 1);
-
-        if (!use_vad) {
-            fprintf(stderr, "%s: n_new_line = %d, no_context = %d\n", __func__, n_new_line, params.no_context);
-        } else {
-            fprintf(stderr, "%s: using VAD, will transcribe on speech activity\n", __func__);
-        }
-
-        fprintf(stderr, "\n");
-    }
-
+    // n_iter merely counts the number of times the whisper model
+    // was invoked. It only appears in print statements.
     int n_iter = 0;
-
     bool is_running = true;
 
-    std::ofstream fout;
-    if (params.fname_out.length() > 0) {
-        fout.open(params.fname_out);
-        if (!fout.is_open()) {
-            fprintf(stderr, "%s: failed to open output file '%s'!\n", __func__, params.fname_out.c_str());
-            return 1;
-        }
-    }
-
-    wav_writer wavWriter;
-    // save wav file
-    if (params.save_audio) {
-        // Get current date/time for filename
-        time_t now = time(0);
-        char buffer[80];
-        strftime(buffer, sizeof(buffer), "%Y%m%d%H%M%S", localtime(&now));
-        std::string filename = std::string(buffer) + ".wav";
-
-        wavWriter.open(filename, WHISPER_SAMPLE_RATE, 16, 1);
-    }
     printf("[Start speaking]\n");
     fflush(stdout);
 
+    /*
+    t_last is the latest time when vad_simple() returned true.
+    I believe it is the last time a falling edge of audio activity
+    was detected, i.e. silence after speaking.
+    */
     auto t_last  = std::chrono::high_resolution_clock::now();
+
+    /*
+    t_start is the time the transcription started. It is never
+    updated during the program's lifetime.
+    */
     const auto t_start = t_last;
 
     // main audio loop
     while (is_running) {
-        if (params.save_audio) {
-            wavWriter.write(pcmf32_new.data(), pcmf32_new.size());
-        }
+
         // handle Ctrl + C
         is_running = sdl_poll_events();
-
         if (!is_running) {
             break;
         }
 
         // process new audio
+        const auto t_now  = std::chrono::high_resolution_clock::now();
+        const auto t_diff = std::chrono::duration_cast<std::chrono::milliseconds>(t_now - t_last).count();
 
-        if (!use_vad) {
-            while (true) {
-                // handle Ctrl + C
-                is_running = sdl_poll_events();
-                if (!is_running) {
-                    break;
-                }
-                audio.get(params.step_ms, pcmf32_new);
+        /*
+        Stop processing if it has been fewer than 2 seconds since
+        the last falling edge of speech activity (i.e. the last time
+        the whisper model was called). This logic also has the effect
+        of clamping the rate of whisper inference invocations at a 
+        max of once every two seconds.
+        */
+        if (t_diff < 2000) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            continue;
+        }
 
-                if ((int) pcmf32_new.size() > 2*n_samples_step) {
-                    fprintf(stderr, "\n\n%s: WARNING: cannot process audio fast enough, dropping audio ...\n\n", __func__);
-                    audio.clear();
+        /*
+        We use the last 2 seconds of audio to try to detect the falling
+        edge of speech activity. Note that audio.get will resize pcmf32_new
+        to the size needed for the requested duration of audio.
+        */
+        audio.get(2000, pcmf32_new);
+        if (::vad_simple(pcmf32_new, WHISPER_SAMPLE_RATE, 1000, params.vad_thold, params.freq_thold, false)) {
+            // TODO update
+            /*
+            For our application, passing the last length_ms audio anytime speech
+            stopped is too clunky, and will result in the same speech being
+            transcribed multiple times if the utterances are short and length_ms
+            is long. It would be better to request ((t_diff) / 1000000) milliseconds
+            (i.e. audio.get(t_diff / 1000000, pcmf32)), and even better if we 
+            also detected the last rising edge of speech activity (say, t_silence_broken)
+            and then used (t_now - t_silence_broken) / 1000000. The only catch to
+            this approach is that if someone is talking continuously, this duration
+            could cause us to ask for more audio than the buffer contains, since
+            we declare at the start how much audio to buffer. It also runs the risk
+            of asking the whisper model to run inference on a huge swath of audio.
+
+            To solve, this we can detect when we have maxed the audio buffer and
+            run inference on that, knowing that we easily could have clipped the
+            speaker's current word. This gives us a transcript of the last x seconds
+            (x being the buffer length) with perhaps some errors around speech
+            within the last second. Knowing that we cut the speaker off, we can
+            plan our next audio range to pass to the whipser model to contain
+            some overlap with the audio we grabbed now. We'd take a task downstream
+            to try to stitch together the transcript.
+
+            I think the basic logic is:
+            is_speaking = false;
+            rising_edge_time = 0;
+            falling_edge_time = 0;
+            while (is_running) {
+                if (!is_speaking && detect_rising_edge()) {
+                    rising_edge_time = now - 2000 (or however big the detection window is)
+                    is_speaking = true
                     continue;
                 }
-
-                if ((int) pcmf32_new.size() >= n_samples_step) {
-                    audio.clear();
-                    break;
+                if (is_speaking && detect_falling_edge()) {
+                    falling_edge_time = now
+                    is_speaking = false
+                    // Run inference on audio from rising_edge_time to falling_edge_time
                 }
-
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                if (is_speaking && now - rising_edge_time close to buffer length) {
+                    // Run inference on audio from rising_edge_time to now
+                    rising_edge_time = now - 2000 (some sensible overlap)
+                }
             }
-
-            const int n_samples_new = pcmf32_new.size();
-
-            // take up to params.length_ms audio from previous iteration
-            const int n_samples_take = std::min((int) pcmf32_old.size(), std::max(0, n_samples_keep + n_samples_len - n_samples_new));
-
-            //printf("processing: take = %d, new = %d, old = %d\n", n_samples_take, n_samples_new, (int) pcmf32_old.size());
-
-            pcmf32.resize(n_samples_new + n_samples_take);
-
-            for (int i = 0; i < n_samples_take; i++) {
-                pcmf32[i] = pcmf32_old[pcmf32_old.size() - n_samples_take + i];
-            }
-
-            memcpy(pcmf32.data() + n_samples_take, pcmf32_new.data(), n_samples_new*sizeof(float));
-
-            pcmf32_old = pcmf32;
+            */
+            audio.get(params.length_ms, pcmf32);
         } else {
-            const auto t_now  = std::chrono::high_resolution_clock::now();
-            const auto t_diff = std::chrono::duration_cast<std::chrono::milliseconds>(t_now - t_last).count();
-
-            if (t_diff < 2000) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
-
-                continue;
-            }
-
-            audio.get(2000, pcmf32_new);
-
-            if (::vad_simple(pcmf32_new, WHISPER_SAMPLE_RATE, 1000, params.vad_thold, params.freq_thold, false)) {
-                audio.get(params.length_ms, pcmf32);
-            } else {
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
-
-                continue;
-            }
-
-            t_last = t_now;
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            continue;
         }
+
+        // t_last stores the latest time for which we decided the 2 seconds
+        // leading up to t_last contained a falling edge of speech activity.
+        t_last = t_now;
 
         // run the inference
         {
@@ -345,85 +310,60 @@ int main(int argc, char ** argv) {
 
             // print result;
             {
-                if (!use_vad) {
-                    printf("\33[2K\r");
+                /*
+                t1 is a DURATION, not a time. The whisper model was just
+                invoked, and t1 is the time since the program's start
+                until the moment right before the whisper model's most
+                recent inference run.
+                t1 should roughly equal "time since program start" as
+                long as the whisper model doesn't take too long.
+                */
+                const int64_t t1 = (t_last - t_start).count()/1000000;
+                /*
+                t0 is length_ms before t1. It is determined by the reasoning
+                "I just detected an utterance of length x ms, so it must have
+                started x ms ago".
+                */
+                const int64_t t0 = std::max(0.0, t1 - pcmf32.size()*1000.0/WHISPER_SAMPLE_RATE);
 
-                    // print long empty line to clear the previous line
-                    printf("%s", std::string(100, ' ').c_str());
-
-                    printf("\33[2K\r");
-                } else {
-                    const int64_t t1 = (t_last - t_start).count()/1000000;
-                    const int64_t t0 = std::max(0.0, t1 - pcmf32.size()*1000.0/WHISPER_SAMPLE_RATE);
-
-                    printf("\n");
-                    printf("### Transcription %d START | t0 = %d ms | t1 = %d ms\n", n_iter, (int) t0, (int) t1);
-                    printf("\n");
-                }
+                printf("\n");
+                printf("### Transcription %d START | t0 = %d ms | t1 = %d ms\n", n_iter, (int) t0, (int) t1);
+                printf("\n");
 
                 const int n_segments = whisper_full_n_segments(ctx);
                 for (int i = 0; i < n_segments; ++i) {
                     const char * text = whisper_full_get_segment_text(ctx, i);
 
-                    if (params.no_timestamps) {
-                        printf("%s", text);
-                        fflush(stdout);
+                    /*
+                    I think t0 and t1 below are timestamps relative
+                    to the window defined by t0 and t1 above.
 
-                        if (params.fname_out.length() > 0) {
-                            fout << text;
-                        }
-                    } else {
-                        const int64_t t0 = whisper_full_get_segment_t0(ctx, i);
-                        const int64_t t1 = whisper_full_get_segment_t1(ctx, i);
+                    TODO try printing to_timestamp(t0_above + t0, false)
+                    instead of to_timestamp(t0, false)
+                    */
+                    const int64_t t0 = whisper_full_get_segment_t0(ctx, i);
+                    const int64_t t1 = whisper_full_get_segment_t1(ctx, i);
 
-                        std::string output = "[" + to_timestamp(t0, false) + " --> " + to_timestamp(t1, false) + "]  " + text;
+                    std::string output = "[" + to_timestamp(t0, false) + " --> " + to_timestamp(t1, false) + "]  " + text;
 
-                        if (whisper_full_get_segment_speaker_turn_next(ctx, i)) {
-                            output += " [SPEAKER_TURN]";
-                        }
-
-                        output += "\n";
-
-                        printf("%s", output.c_str());
-                        fflush(stdout);
-
-                        if (params.fname_out.length() > 0) {
-                            fout << output;
-                        }
+                    // I think for my use-case this is always false
+                    if (whisper_full_get_segment_speaker_turn_next(ctx, i)) {
+                        output += " [SPEAKER_TURN]";
                     }
+
+                    output += "\n";
+
+                    printf("%s", output.c_str());
+                    fflush(stdout);
+
                 }
 
-                if (params.fname_out.length() > 0) {
-                    fout << std::endl;
-                }
-
-                if (use_vad) {
-                    printf("\n");
-                    printf("### Transcription %d END\n", n_iter);
-                }
+                printf("\n");
+                printf("### Transcription %d END\n", n_iter);
             }
 
             ++n_iter;
 
-            if (!use_vad && (n_iter % n_new_line) == 0) {
-                printf("\n");
-
-                // keep part of the audio for next iteration to try to mitigate word boundary issues
-                pcmf32_old = std::vector<float>(pcmf32.end() - n_samples_keep, pcmf32.end());
-
-                // Add tokens of the last full length segment as the prompt
-                if (!params.no_context) {
-                    prompt_tokens.clear();
-
-                    const int n_segments = whisper_full_n_segments(ctx);
-                    for (int i = 0; i < n_segments; ++i) {
-                        const int token_count = whisper_full_n_tokens(ctx, i);
-                        for (int j = 0; j < token_count; ++j) {
-                            prompt_tokens.push_back(whisper_full_get_token_id(ctx, i, j));
-                        }
-                    }
-                }
-            }
             fflush(stdout);
         }
     }
