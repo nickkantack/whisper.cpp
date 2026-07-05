@@ -191,6 +191,12 @@ int main(int argc, char ** argv) {
     */
     const auto t_start = t_last;
 
+    auto speech_start_time_cursor = 
+        std::chrono::high_resolution_clock::now();
+    auto next_speech_start_time_cursor = 
+        std::chrono::high_resolution_clock::now();
+    bool is_speaking = false;
+
     // main audio loop
     while (is_running) {
 
@@ -200,82 +206,72 @@ int main(int argc, char ** argv) {
             break;
         }
 
+        const int decision_interval_ms = 2000;
+        const int min_ms_between_loops = 100;
+
         // process new audio
         const auto t_now  = std::chrono::high_resolution_clock::now();
         const auto t_diff = std::chrono::duration_cast<std::chrono::milliseconds>(t_now - t_last).count();
 
         /*
-        Stop processing if it has been fewer than 2 seconds since
-        the last falling edge of speech activity (i.e. the last time
-        the whisper model was called). This logic also has the effect
-        of clamping the rate of whisper inference invocations at a 
-        max of once every two seconds.
+        Decisions about whether to transcribe are made every 2 seconds.
+        continue if not time to make a decision yet.
         */
-        if (t_diff < 2000) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        if (t_diff < decision_interval_ms) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(min_ms_between_loops));
             continue;
         }
+
+        // t_last stores the latest time for which we made a transcription
+        // decision.
+        t_last = t_now;
 
         /*
         We use the last 2 seconds of audio to try to detect the falling
         edge of speech activity. Note that audio.get will resize pcmf32_new
         to the size needed for the requested duration of audio.
         */
-        audio.get(2000, pcmf32_new);
-        if (::vad_simple(pcmf32_new, WHISPER_SAMPLE_RATE, 1000, params.vad_thold, params.freq_thold, false)) {
-            // TODO update
-            /*
-            For our application, passing the last length_ms audio anytime speech
-            stopped is too clunky, and will result in the same speech being
-            transcribed multiple times if the utterances are short and length_ms
-            is long. It would be better to request ((t_diff) / 1000000) milliseconds
-            (i.e. audio.get(t_diff / 1000000, pcmf32)), and even better if we 
-            also detected the last rising edge of speech activity (say, t_silence_broken)
-            and then used (t_now - t_silence_broken) / 1000000. The only catch to
-            this approach is that if someone is talking continuously, this duration
-            could cause us to ask for more audio than the buffer contains, since
-            we declare at the start how much audio to buffer. It also runs the risk
-            of asking the whisper model to run inference on a huge swath of audio.
+        audio.get(decision_interval_ms, pcmf32_new);
 
-            To solve, this we can detect when we have maxed the audio buffer and
-            run inference on that, knowing that we easily could have clipped the
-            speaker's current word. This gives us a transcript of the last x seconds
-            (x being the buffer length) with perhaps some errors around speech
-            within the last second. Knowing that we cut the speaker off, we can
-            plan our next audio range to pass to the whipser model to contain
-            some overlap with the audio we grabbed now. We'd take a task downstream
-            to try to stitch together the transcript.
+        printf("%0.f% ms since cursor\n", (t_now - speech_start_time_cursor).count() / 1E6);
 
-            I think the basic logic is:
+        bool do_run_inference = false;
+        bool do_need_overlap = false;
+        const VadState vad_state = get_vad_state(
+            pcmf32_new, WHISPER_SAMPLE_RATE, decision_interval_ms / 2, params.vad_thold, 
+            params.freq_thold, false);
+
+        if (!is_speaking && vad_state == VadState::ActivityStart) {
+            printf("Speech start detected\n");
+            speech_start_time_cursor = t_now - std::chrono::milliseconds(decision_interval_ms);
+
+            is_speaking = true;
+            continue;
+        }
+        if (is_speaking && vad_state == VadState::ActivityEnd) {
+            printf("Speech end detected\n");
+            next_speech_start_time_cursor = t_now;
             is_speaking = false;
-            rising_edge_time = 0;
-            falling_edge_time = 0;
-            while (is_running) {
-                if (!is_speaking && detect_rising_edge()) {
-                    rising_edge_time = now - 2000 (or however big the detection window is)
-                    is_speaking = true
-                    continue;
-                }
-                if (is_speaking && detect_falling_edge()) {
-                    falling_edge_time = now
-                    is_speaking = false
-                    // Run inference on audio from rising_edge_time to falling_edge_time
-                }
-                if (is_speaking && now - rising_edge_time close to buffer length) {
-                    // Run inference on audio from rising_edge_time to now
-                    rising_edge_time = now - 2000 (some sensible overlap)
-                }
-            }
-            */
-            audio.get(params.length_ms, pcmf32);
+            do_run_inference = true;
+        } else if (is_speaking && (t_now - speech_start_time_cursor).count() / 1E6 > params.length_ms - decision_interval_ms) {
+            printf("Droning detected\n");
+            // Run inference on audio from rising_edge_time to now
+            next_speech_start_time_cursor = t_now - std::chrono::milliseconds(decision_interval_ms);
+            do_need_overlap = true;
+            do_run_inference = true;
+        } else if (is_speaking) {
+            printf("Still speaking\n");
         } else {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            printf("Still silent\n");
+        }
+
+        if (!do_run_inference) {
             continue;
         }
 
-        // t_last stores the latest time for which we decided the 2 seconds
-        // leading up to t_last contained a falling edge of speech activity.
-        t_last = t_now;
+        audio.get((int) ((t_now - speech_start_time_cursor).count() / 1E6), pcmf32);
+
+        speech_start_time_cursor = next_speech_start_time_cursor;
 
         // run the inference
         {
@@ -303,10 +299,14 @@ int main(int argc, char ** argv) {
             wparams.prompt_tokens    = params.no_context ? nullptr : prompt_tokens.data();
             wparams.prompt_n_tokens  = params.no_context ? 0       : prompt_tokens.size();
 
+            const auto whisper_inference_start_time = std::chrono::high_resolution_clock::now();
+            printf("Whispering...\n");
             if (whisper_full(ctx, wparams, pcmf32.data(), pcmf32.size()) != 0) {
                 fprintf(stderr, "%s: failed to process audio\n", argv[0]);
                 return 6;
             }
+            const auto whisper_inference_end_time = std::chrono::high_resolution_clock::now();
+            printf("Inference took %d ms", (int) ((whisper_inference_end_time - whisper_inference_start_time).count() / 1E6));
 
             // print result;
             {
@@ -345,6 +345,16 @@ int main(int argc, char ** argv) {
                     const int64_t t1 = whisper_full_get_segment_t1(ctx, i);
 
                     std::string output = "[" + to_timestamp(t0, false) + " --> " + to_timestamp(t1, false) + "]  " + text;
+
+                    if (do_need_overlap) {
+                        /*
+                        Print an indication that this segment batch cut the
+                        speaker off and may contain errors at the end or the
+                        next iteration will overlap the most recently used
+                        audio stretch.
+                        */
+                        output += " (drone)";
+                    }
 
                     // I think for my use-case this is always false
                     if (whisper_full_get_segment_speaker_turn_next(ctx, i)) {

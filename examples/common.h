@@ -239,6 +239,20 @@ void high_pass_filter(
         float cutoff,
         float sample_rate);
 
+enum class VadState {
+    ActivityStart,
+    ActivityContinue,
+    ActivityEnd
+};
+
+VadState get_vad_state(
+    std::vector<float> & pcmf32,
+    int   sample_rate,
+    int   last_ms,
+    float vad_thold,
+    float freq_thold,
+    bool  verbose);
+
 // Basic voice activity detection (VAD) using audio energy adaptive threshold
 bool vad_simple(
         std::vector<float> & pcmf32,
