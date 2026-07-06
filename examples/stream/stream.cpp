@@ -183,7 +183,7 @@ int main(int argc, char ** argv) {
     I believe it is the last time a falling edge of audio activity
     was detected, i.e. silence after speaking.
     */
-    auto t_last  = std::chrono::high_resolution_clock::now();
+    auto t_last = std::chrono::high_resolution_clock::now();
 
     /*
     t_start is the time the transcription started. It is never
@@ -193,8 +193,18 @@ int main(int argc, char ** argv) {
 
     auto speech_start_time_cursor = 
         std::chrono::high_resolution_clock::now();
+    auto speech_start_approximate_system_time_cursor = 
+        std::chrono::system_clock::now();
+    /*
+auto t = std::chrono::system_clock::to_time_t(now);
+
+std::cout << std::put_time(std::localtime(&t), "%F %T") << '\n';
+    */
+
     auto next_speech_start_time_cursor = 
         std::chrono::high_resolution_clock::now();
+    auto next_speech_start_approximate_system_time_cursor = 
+        std::chrono::system_clock::now();
     bool is_speaking = false;
 
     // main audio loop
@@ -212,6 +222,7 @@ int main(int argc, char ** argv) {
         // process new audio
         const auto t_now  = std::chrono::high_resolution_clock::now();
         const auto t_diff = std::chrono::duration_cast<std::chrono::milliseconds>(t_now - t_last).count();
+        const auto system_clock_now = std::chrono::system_clock::now();
 
         /*
         Decisions about whether to transcribe are made every 2 seconds.
@@ -244,19 +255,23 @@ int main(int argc, char ** argv) {
         if (!is_speaking && vad_state == VadState::ActivityStart) {
             // printf("Speech start detected\n");
             speech_start_time_cursor = t_now - std::chrono::milliseconds(decision_interval_ms);
-
+            speech_start_approximate_system_time_cursor = system_clock_now -
+                std::chrono::milliseconds(decision_interval_ms);
             is_speaking = true;
             continue;
         }
         if (is_speaking && vad_state == VadState::ActivityEnd) {
             // printf("Speech end detected\n");
             next_speech_start_time_cursor = t_now;
+            next_speech_start_approximate_system_time_cursor = system_clock_now;
             is_speaking = false;
             do_run_inference = true;
         } else if (is_speaking && (t_now - speech_start_time_cursor).count() / 1E6 > params.length_ms - decision_interval_ms) {
             // printf("Droning detected\n");
             // Run inference on audio from rising_edge_time to now
             next_speech_start_time_cursor = t_now - std::chrono::milliseconds(decision_interval_ms);
+            next_speech_start_approximate_system_time_cursor = system_clock_now - 
+                std::chrono::milliseconds(decision_interval_ms);
             do_need_overlap = true;
             do_run_inference = true;
         } else if (is_speaking) {
@@ -271,7 +286,6 @@ int main(int argc, char ** argv) {
 
         audio.get((int) ((t_now - speech_start_time_cursor).count() / 1E6), pcmf32);
 
-        speech_start_time_cursor = next_speech_start_time_cursor;
 
         // run the inference
         {
@@ -299,52 +313,27 @@ int main(int argc, char ** argv) {
             wparams.prompt_tokens    = params.no_context ? nullptr : prompt_tokens.data();
             wparams.prompt_n_tokens  = params.no_context ? 0       : prompt_tokens.size();
 
-            const auto whisper_inference_start_time = std::chrono::high_resolution_clock::now();
-            // printf("Whispering...\n");
             if (whisper_full(ctx, wparams, pcmf32.data(), pcmf32.size()) != 0) {
                 fprintf(stderr, "%s: failed to process audio\n", argv[0]);
                 return 6;
             }
-            const auto whisper_inference_end_time = std::chrono::high_resolution_clock::now();
-            // printf("Inference took %d ms", (int) ((whisper_inference_end_time - whisper_inference_start_time).count() / 1E6));
 
-            // print result;
+            auto speech_system_start_to_time_t = 
+                std::chrono::system_clock::to_time_t(speech_start_approximate_system_time_cursor);
+
             {
-                /*
-                t1 is a DURATION, not a time. The whisper model was just
-                invoked, and t1 is the time since the program's start
-                until the moment right before the whisper model's most
-                recent inference run.
-                t1 should roughly equal "time since program start" as
-                long as the whisper model doesn't take too long.
-                */
-                const int64_t t1 = (t_last - t_start).count()/1000000;
-                /*
-                t0 is length_ms before t1. It is determined by the reasoning
-                "I just detected an utterance of length x ms, so it must have
-                started x ms ago".
-                */
-                const int64_t t0 = std::max(0.0, t1 - pcmf32.size()*1000.0/WHISPER_SAMPLE_RATE);
-
-                // printf("\n");
-                // printf("### Transcription %d START | t0 = %d ms | t1 = %d ms\n", n_iter, (int) t0, (int) t1);
-                // printf("\n");
-
                 const int n_segments = whisper_full_n_segments(ctx);
                 for (int i = 0; i < n_segments; ++i) {
                     const char * text = whisper_full_get_segment_text(ctx, i);
 
-                    /*
-                    I think t0 and t1 below are timestamps relative
-                    to the window defined by t0 and t1 above.
+                    std::ostringstream oss;
 
-                    TODO try printing to_timestamp(t0_above + t0, false)
-                    instead of to_timestamp(t0, false)
-                    */
-                    const int64_t t0 = whisper_full_get_segment_t0(ctx, i);
-                    const int64_t t1 = whisper_full_get_segment_t1(ctx, i);
+                    oss << "["
+                        << std::put_time(std::localtime(&speech_system_start_to_time_t), "%F %T")
+                        << "]  "
+                        << text;
 
-                    std::string output = "[" + to_timestamp(t0, false) + " --> " + to_timestamp(t1, false) + "]  " + text;
+                    std::string output = oss.str();
 
                     if (do_need_overlap) {
                         /*
@@ -369,15 +358,16 @@ int main(int argc, char ** argv) {
                     }
 
                 }
-
-                // printf("\n");
-                // printf("### Transcription %d END\n", n_iter);
             }
 
             ++n_iter;
 
             fflush(stdout);
         }
+
+        speech_start_time_cursor = next_speech_start_time_cursor;
+        speech_start_approximate_system_time_cursor = 
+            next_speech_start_approximate_system_time_cursor;
     }
 
     audio.pause();
