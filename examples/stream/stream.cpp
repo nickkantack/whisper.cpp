@@ -233,7 +233,7 @@ int main(int argc, char ** argv) {
         */
         audio.get(decision_interval_ms, pcmf32_new);
 
-        printf("%0.f% ms since cursor\n", (t_now - speech_start_time_cursor).count() / 1E6);
+        // printf("%0.f% ms since cursor\n", (t_now - speech_start_time_cursor).count() / 1E6);
 
         bool do_run_inference = false;
         bool do_need_overlap = false;
@@ -242,27 +242,27 @@ int main(int argc, char ** argv) {
             params.freq_thold, false);
 
         if (!is_speaking && vad_state == VadState::ActivityStart) {
-            printf("Speech start detected\n");
+            // printf("Speech start detected\n");
             speech_start_time_cursor = t_now - std::chrono::milliseconds(decision_interval_ms);
 
             is_speaking = true;
             continue;
         }
         if (is_speaking && vad_state == VadState::ActivityEnd) {
-            printf("Speech end detected\n");
+            // printf("Speech end detected\n");
             next_speech_start_time_cursor = t_now;
             is_speaking = false;
             do_run_inference = true;
         } else if (is_speaking && (t_now - speech_start_time_cursor).count() / 1E6 > params.length_ms - decision_interval_ms) {
-            printf("Droning detected\n");
+            // printf("Droning detected\n");
             // Run inference on audio from rising_edge_time to now
             next_speech_start_time_cursor = t_now - std::chrono::milliseconds(decision_interval_ms);
             do_need_overlap = true;
             do_run_inference = true;
         } else if (is_speaking) {
-            printf("Still speaking\n");
+            // printf("Still speaking\n");
         } else {
-            printf("Still silent\n");
+            // printf("Still silent\n");
         }
 
         if (!do_run_inference) {
@@ -300,13 +300,13 @@ int main(int argc, char ** argv) {
             wparams.prompt_n_tokens  = params.no_context ? 0       : prompt_tokens.size();
 
             const auto whisper_inference_start_time = std::chrono::high_resolution_clock::now();
-            printf("Whispering...\n");
+            // printf("Whispering...\n");
             if (whisper_full(ctx, wparams, pcmf32.data(), pcmf32.size()) != 0) {
                 fprintf(stderr, "%s: failed to process audio\n", argv[0]);
                 return 6;
             }
             const auto whisper_inference_end_time = std::chrono::high_resolution_clock::now();
-            printf("Inference took %d ms", (int) ((whisper_inference_end_time - whisper_inference_start_time).count() / 1E6));
+            // printf("Inference took %d ms", (int) ((whisper_inference_end_time - whisper_inference_start_time).count() / 1E6));
 
             // print result;
             {
@@ -326,9 +326,9 @@ int main(int argc, char ** argv) {
                 */
                 const int64_t t0 = std::max(0.0, t1 - pcmf32.size()*1000.0/WHISPER_SAMPLE_RATE);
 
-                printf("\n");
-                printf("### Transcription %d START | t0 = %d ms | t1 = %d ms\n", n_iter, (int) t0, (int) t1);
-                printf("\n");
+                // printf("\n");
+                // printf("### Transcription %d START | t0 = %d ms | t1 = %d ms\n", n_iter, (int) t0, (int) t1);
+                // printf("\n");
 
                 const int n_segments = whisper_full_n_segments(ctx);
                 for (int i = 0; i < n_segments; ++i) {
@@ -363,13 +363,15 @@ int main(int argc, char ** argv) {
 
                     output += "\n";
 
-                    printf("%s", output.c_str());
-                    fflush(stdout);
+                    if (text != "[BLANK_AUDIO]") {
+                        printf("%s", output.c_str());
+                        fflush(stdout);
+                    }
 
                 }
 
-                printf("\n");
-                printf("### Transcription %d END\n", n_iter);
+                // printf("\n");
+                // printf("### Transcription %d END\n", n_iter);
             }
 
             ++n_iter;

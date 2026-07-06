@@ -646,7 +646,7 @@ VadState get_vad_state(
         fprintf(stderr, "%s: energy_all: %f, energy_last: %f, vad_thold: %f, freq_thold: %f\n", __func__, energy_all, energy_last, vad_thold, freq_thold);
     }
 
-    if (energy_last > vad_thold * energy_all) {
+    if (energy_last > vad_thold * energy_all && energy_last > 1E-4) {
         return VadState::ActivityStart;
     }
     if (energy_all > vad_thold * energy_last) {
