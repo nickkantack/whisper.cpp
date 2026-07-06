@@ -363,7 +363,7 @@ int main(int argc, char ** argv) {
 
                     output += "\n";
 
-                    if (text != "[BLANK_AUDIO]") {
+                    if (std::strcmp(text, " [BLANK_AUDIO]") != 0) {
                         printf("%s", output.c_str());
                         fflush(stdout);
                     }
