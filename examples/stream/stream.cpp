@@ -202,6 +202,8 @@ int main(int argc, char ** argv) {
             speech_start_approximate_system_time_cursor = system_clock_now -
                 std::chrono::milliseconds(decision_interval_ms);
             is_speaking = true;
+            printf("{\"type\": \"SpeechStartEvent\"}\n");
+            fflush(stdout);
             continue;
         }
         if (is_speaking && vad_state == VadState::ActivityEnd) {
@@ -209,6 +211,8 @@ int main(int argc, char ** argv) {
             next_speech_start_approximate_system_time_cursor = system_clock_now;
             is_speaking = false;
             do_run_inference = true;
+            printf("{\"type\": \"SpeechStopEvent\"}\n");
+            fflush(stdout);
         } else if (is_speaking && (t_now - speech_start_time_cursor).count() / 1E6 > params.length_ms - decision_interval_ms) {
             next_speech_start_time_cursor = t_now - std::chrono::milliseconds(decision_interval_ms);
             next_speech_start_approximate_system_time_cursor = system_clock_now - 
@@ -241,10 +245,14 @@ int main(int argc, char ** argv) {
         wparams.prompt_tokens    = use_prompt ? nullptr : prompt_tokens.data();
         wparams.prompt_n_tokens  = use_prompt ? 0       : prompt_tokens.size();
 
+        printf("{\"type\": \"InferenceStartEvent\"}\n");
+        fflush(stdout);
         if (whisper_full(ctx, wparams, pcmf32.data(), pcmf32.size()) != 0) {
             fprintf(stderr, "%s: failed to process audio\n", argv[0]);
             return 6;
         }
+        printf("{\"type\": \"InferenceStopEvent\"}\n");
+        fflush(stdout);
 
         auto speech_system_start_to_time_t = 
             std::chrono::system_clock::to_time_t(speech_start_approximate_system_time_cursor);
@@ -261,10 +269,8 @@ int main(int argc, char ** argv) {
                 std::string output = "{\"type\":\"SegmentEvent\", \"time\": \"" + 
                     timestamp_string + "\", \"text\":\"" + text + (was_speaker_cut_off ? " (continuing...)" : "") + "\"}\n";
 
-                if (std::strcmp(text, " [BLANK_AUDIO]") != 0) {
-                    printf("%s", output.c_str());
-                    fflush(stdout);
-                }
+                printf("%s", output.c_str());
+                fflush(stdout);
             }
         }
 
