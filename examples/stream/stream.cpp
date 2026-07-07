@@ -30,7 +30,6 @@ struct whisper_params {
     bool translate     = false;
     bool no_fallback   = false;
     bool print_special = false;
-    bool no_context    = true;
     bool no_timestamps = false;
     bool tinydiarize   = false;
     bool save_audio    = false; // save audio to wav file
@@ -89,7 +88,6 @@ int main(int argc, char ** argv) {
     // use case.
     const bool use_vad = true;
     params.no_timestamps  = !use_vad;
-    params.no_context    |= use_vad;
     params.max_tokens     = 0;
 
     /*
@@ -124,10 +122,21 @@ int main(int argc, char ** argv) {
 
     // TODO could initialize with domain specific vocab
     std::vector<whisper_token> prompt_tokens;
+    bool use_prompt = true;
+    std::string prompt_text = "This is a transcript of radio chatter.";
+    {
+        prompt_tokens.resize(1024);
+        const int n = whisper_tokenize(ctx, prompt_text.c_str(), prompt_tokens.data(), 1024);
+        if (n < 0) {
+            fprintf(stderr, "%s: error: failed to tokenize prompt '%s'\n", __func__, prompt_text.c_str());
+            return 4;
+        }
+        prompt_tokens.resize(n);
+    }
 
     bool is_running = true;
 
-    printf("[Start speaking]\n");
+    printf("{\"type\": \"InitializationEvent\"}\n");
     fflush(stdout);
 
     auto last_inference_time = std::chrono::high_resolution_clock::now();
@@ -229,8 +238,8 @@ int main(int argc, char ** argv) {
         wparams.audio_ctx        = params.audio_ctx;
         wparams.tdrz_enable      = params.tinydiarize; // [TDRZ]
         wparams.temperature_inc  = params.no_fallback ? 0.0f : wparams.temperature_inc;
-        wparams.prompt_tokens    = params.no_context ? nullptr : prompt_tokens.data();
-        wparams.prompt_n_tokens  = params.no_context ? 0       : prompt_tokens.size();
+        wparams.prompt_tokens    = use_prompt ? nullptr : prompt_tokens.data();
+        wparams.prompt_n_tokens  = use_prompt ? 0       : prompt_tokens.size();
 
         if (whisper_full(ctx, wparams, pcmf32.data(), pcmf32.size()) != 0) {
             fprintf(stderr, "%s: failed to process audio\n", argv[0]);
@@ -246,30 +255,11 @@ int main(int argc, char ** argv) {
                 const char * text = whisper_full_get_segment_text(ctx, i);
 
                 std::ostringstream oss;
+                oss << std::put_time(std::localtime(&speech_system_start_to_time_t), "%F %T");
+                std::string timestamp_string = oss.str();
 
-                oss << "["
-                    << std::put_time(std::localtime(&speech_system_start_to_time_t), "%F %T")
-                    << "]  "
-                    << text;
-
-                std::string output = oss.str();
-
-                if (was_speaker_cut_off) {
-                    /*
-                    Print an indication that this segment batch cut the
-                    speaker off and may contain errors at the end or the
-                    next iteration will overlap the most recently used
-                    audio stretch.
-                    */
-                    output += " (continuing...)";
-                }
-
-                // I think for my use-case this is always false
-                if (whisper_full_get_segment_speaker_turn_next(ctx, i)) {
-                    output += " [SPEAKER_TURN]";
-                }
-
-                output += "\n";
+                std::string output = "{\"type\":\"SegmentEvent\", \"time\": \"" + 
+                    timestamp_string + "\", \"text\":\"" + text + (was_speaker_cut_off ? " (continuing...)" : "") + "\"}\n";
 
                 if (std::strcmp(text, " [BLANK_AUDIO]") != 0) {
                     printf("%s", output.c_str());
