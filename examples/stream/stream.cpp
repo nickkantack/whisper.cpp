@@ -63,6 +63,17 @@ static bool whisper_params_parse(int argc, char ** argv, whisper_params & params
     return true;
 }
 
+static std::string get_system_timestamp() {
+    auto system_time_as_time_t = 
+        std::chrono::system_clock::to_time_t(
+            std::chrono::system_clock::now()
+        );
+    std::ostringstream oss;
+    oss << std::put_time(std::localtime(&system_time_as_time_t), "%F %T");
+    std::string timestamp_string = oss.str();
+    return timestamp_string;
+}
+
 void whisper_print_usage(int /*argc*/, char ** argv, const whisper_params & params) {
     fprintf(stderr, "\n");
     fprintf(stderr, "usage: %s [options]\n", argv[0]);
@@ -136,7 +147,8 @@ int main(int argc, char ** argv) {
 
     bool is_running = true;
 
-    printf("{\"type\": \"InitializationEvent\"}\n");
+    std::string event = "{\"type\": \"InitializationEvent\",\"time\":\"" + get_system_timestamp() + "\"}\n";
+    printf("%s", event.c_str());
     fflush(stdout);
 
     auto last_inference_time = std::chrono::high_resolution_clock::now();
@@ -202,7 +214,8 @@ int main(int argc, char ** argv) {
             speech_start_approximate_system_time_cursor = system_clock_now -
                 std::chrono::milliseconds(decision_interval_ms);
             is_speaking = true;
-            printf("{\"type\": \"SpeechStartEvent\"}\n");
+            event = "{\"type\": \"SpeechStartEvent\",\"time\":\"" + get_system_timestamp() + "\"}\n";
+            printf("%s", event.c_str());
             fflush(stdout);
             continue;
         }
@@ -211,7 +224,8 @@ int main(int argc, char ** argv) {
             next_speech_start_approximate_system_time_cursor = system_clock_now;
             is_speaking = false;
             do_run_inference = true;
-            printf("{\"type\": \"SpeechStopEvent\"}\n");
+            event = "{\"type\": \"SpeechStopEvent\",\"time\":\"" + get_system_timestamp() + "\"}\n";
+            printf("%s", event.c_str());
             fflush(stdout);
         } else if (is_speaking && (t_now - speech_start_time_cursor).count() / 1E6 > params.length_ms - decision_interval_ms) {
             next_speech_start_time_cursor = t_now - std::chrono::milliseconds(decision_interval_ms);
@@ -245,13 +259,15 @@ int main(int argc, char ** argv) {
         wparams.prompt_tokens    = use_prompt ? nullptr : prompt_tokens.data();
         wparams.prompt_n_tokens  = use_prompt ? 0       : prompt_tokens.size();
 
-        printf("{\"type\": \"InferenceStartEvent\"}\n");
+        std::string event = "{\"type\": \"InterferenceStartEvent\",\"time\":\"" + get_system_timestamp() + "\"}\n";
+        printf("%s", event.c_str());
         fflush(stdout);
         if (whisper_full(ctx, wparams, pcmf32.data(), pcmf32.size()) != 0) {
             fprintf(stderr, "%s: failed to process audio\n", argv[0]);
             return 6;
         }
-        printf("{\"type\": \"InferenceStopEvent\"}\n");
+        event = "{\"type\": \"InterferenceStopEvent\",\"time\":\"" + get_system_timestamp() + "\"}\n";
+        printf("%s", event.c_str());
         fflush(stdout);
 
         auto speech_system_start_to_time_t = 
