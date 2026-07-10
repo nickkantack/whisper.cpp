@@ -13,6 +13,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include <iomanip>
 
 struct whisper_params {
     int32_t n_threads  = std::min(4, (int32_t) std::thread::hardware_concurrency());
@@ -84,6 +85,24 @@ void whisper_print_usage(int /*argc*/, char ** argv, const whisper_params & para
     fprintf(stderr, "            --length N      [%-7d] audio length in milliseconds\n",                   params.length_ms);
     fprintf(stderr, "  -c ID,    --capture ID    [%-7d] capture device ID\n",                              params.capture_id);
     fprintf(stderr, "\n");
+}
+
+std::string make_uuid() {
+    static std::random_device rd;
+    static std::mt19937_64 gen(rd());
+
+    uint64_t a = gen();
+    uint64_t b = gen();
+
+    std::ostringstream oss;
+    oss << std::hex << std::setfill('0')
+        << std::setw(8) << (uint32_t)(a >> 32) << '-'
+        << std::setw(4) << (uint16_t)(a >> 16) << '-'
+        << std::setw(4) << (uint16_t)a << '-'
+        << std::setw(4) << (uint16_t)(b >> 48) << '-'
+        << std::setw(12) << (b & 0x0000FFFFFFFFFFFFULL);
+
+    return oss.str();
 }
 
 int main(int argc, char ** argv) {
@@ -165,6 +184,8 @@ int main(int argc, char ** argv) {
         std::chrono::system_clock::now();
 
     bool is_speaking = false;
+
+    wav_writer wavWriter;
 
     // main audio loop
     while (is_running) {
@@ -285,8 +306,24 @@ int main(int argc, char ** argv) {
                 std::string output = "{\"type\":\"SegmentEvent\", \"time\": \"" + 
                     timestamp_string + "\", \"text\":\"" + text + (was_speaker_cut_off ? " (continuing...)" : "") + "\"}\n";
 
-                printf("%s", output.c_str());
-                fflush(stdout);
+                if (text != " [BLANK_AUDIO]") {
+                    static int segment_id = 0;
+
+
+                    {
+                        std::string uuid = make_uuid();
+                        char filename[64];
+                        snprintf(filename, sizeof(filename), "segment_%s.wav", uuid.c_str());
+                        wavWriter.open(filename, WHISPER_SAMPLE_RATE, 16, 1);
+                        wavWriter.write(pcmf32.data(), pcmf32.size());
+                        wavWriter.close();
+                        std::ofstream out("segment_" + uuid + ".txt");
+                        out << text;
+                    }
+
+                    printf("%s", output.c_str());
+                    fflush(stdout);
+                }
             }
         }
 
