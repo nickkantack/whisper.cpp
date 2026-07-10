@@ -153,7 +153,7 @@ int main(int argc, char ** argv) {
     // TODO could initialize with domain specific vocab
     std::vector<whisper_token> prompt_tokens;
     bool use_prompt = true;
-    std::string prompt_text = "This is a transcript of radio chatter.";
+    std::string prompt_text = "This is a transcript of radio chatter. It often includes references to \"SAR\", acronym for Search and Rescue.";
     {
         prompt_tokens.resize(1024);
         const int n = whisper_tokenize(ctx, prompt_text.c_str(), prompt_tokens.data(), 1024);
@@ -299,6 +299,21 @@ int main(int argc, char ** argv) {
             for (int i = 0; i < n_segments; ++i) {
                 const char * text = whisper_full_get_segment_text(ctx, i);
 
+                /* TODO - https://github.com/ggml-org/whisper.cpp/blob/master/examples/stream/stream.cpp#L376
+                Shows a method to computer t0 and t1 which are stop and start times relative to the 
+                speech_system_start_to_time_t. Use these to save only the audio (the portion of pcmf32)
+                that participated in the segment.
+                */
+
+                // t0 and t1 are in units of hundredths of seconds
+                const int64_t t0 = whisper_full_get_segment_t0(ctx, i);
+                const int64_t t1 = whisper_full_get_segment_t1(ctx, i);
+
+                const int64_t start_index = t0 * WHISPER_SAMPLE_RATE / 100;
+                const int64_t end_index = t1 * WHISPER_SAMPLE_RATE / 100;
+
+                const std::vector<float> relevant_pcmf32(pcmf32.begin() + start_index, pcmf32.begin() + end_index);
+
                 std::ostringstream oss;
                 oss << std::put_time(std::localtime(&speech_system_start_to_time_t), "%F %T");
                 std::string timestamp_string = oss.str();
@@ -306,19 +321,17 @@ int main(int argc, char ** argv) {
                 std::string output = "{\"type\":\"SegmentEvent\", \"time\": \"" + 
                     timestamp_string + "\", \"text\":\"" + text + (was_speaker_cut_off ? " (continuing...)" : "") + "\"}\n";
 
-                if (text != " [BLANK_AUDIO]") {
-                    static int segment_id = 0;
-
+                if (strcmp(text, " [BLANK_AUDIO]") != 0) {
 
                     {
                         std::string uuid = make_uuid();
                         char filename[64];
                         snprintf(filename, sizeof(filename), "segment_%s.wav", uuid.c_str());
                         wavWriter.open(filename, WHISPER_SAMPLE_RATE, 16, 1);
-                        wavWriter.write(pcmf32.data(), pcmf32.size());
+                        wavWriter.write(relevant_pcmf32.data(), relevant_pcmf32.size());
                         wavWriter.close();
                         std::ofstream out("segment_" + uuid + ".txt");
-                        out << text;
+                        out << output;
                     }
 
                     printf("%s", output.c_str());
