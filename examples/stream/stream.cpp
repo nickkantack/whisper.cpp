@@ -14,6 +14,8 @@
 #include <thread>
 #include <vector>
 #include <iomanip>
+#include <pybind11/embed.h>
+#include <pybind11/numpy.h>
 
 struct whisper_params {
     int32_t n_threads  = std::min(4, (int32_t) std::thread::hardware_concurrency());
@@ -104,6 +106,11 @@ std::string make_uuid() {
 }
 
 int main(int argc, char ** argv) {
+
+    pybind11::scoped_interpreter guard{};
+
+    pybind11::module_ test = pybind11::module_::import("test");
+
     ggml_backend_load_all();
 
     whisper_params params;
@@ -221,6 +228,16 @@ int main(int argc, char ** argv) {
         to the size needed for the requested duration of audio.
         */
         audio.get(decision_interval_ms, pcmf32_new);
+
+        /*
+        pybind11::array_t<float> audio_for_python(
+            pcmf32_new.size(),
+            pcmf32_new.data()
+        );
+        int array_length_from_python = test.attr("main")(audio_for_python).cast<int>();
+        printf("Python measured the length as: %d\n", array_length_from_python);
+        fflush(stdout);
+        */
 
         bool do_run_inference = false;
         bool was_speaker_cut_off = false;
