@@ -32,58 +32,7 @@ else()
     set(WHISPER_STANDALONE OFF)
 endif()
 
-if (EMSCRIPTEN)
-    set(BUILD_SHARED_LIBS_DEFAULT OFF)
-
-    set(CMAKE_CXX_STANDARD 17)
-    set(CMAKE_CXX_STANDARD_REQUIRED ON)
-
-    option(WHISPER_WASM_SINGLE_FILE "whisper: embed WASM inside the generated whisper.js" ON)
-
-    # TODO: without these, we get the following error:
-    #       wasm-ld: error: --shared-memory is disallowed by whisper.cpp.o because it was not compiled with 'atomics' or 'bulk-memory' features.
-    set(CMAKE_C_FLAGS   "${CMAKE_C_FLAGS}   -pthread")
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -pthread")
-
-    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -s TOTAL_STACK=5242880")
-    set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -s TOTAL_STACK=5242880")
-
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-deprecated")
-else()
-    if (MINGW)
-        set(BUILD_SHARED_LIBS_DEFAULT OFF)
-    else()
-        set(BUILD_SHARED_LIBS_DEFAULT ON)
-    endif()
-endif()
-
 option(BUILD_SHARED_LIBS "build shared libraries" ${BUILD_SHARED_LIBS_DEFAULT})
-
-#
-# option list
-#
-
-# debug
-option(WHISPER_ALL_WARNINGS           "whisper: enable all compiler warnings"                   ON)
-option(WHISPER_ALL_WARNINGS_3RD_PARTY "whisper: enable all compiler warnings in 3rd party libs" OFF)
-
-# build
-option(WHISPER_FATAL_WARNINGS  "whisper: enable -Werror flag"               OFF)
-option(WHISPER_USE_SYSTEM_GGML "whisper: use system-installed GGML library" OFF)
-
-# sanitizers
-option(WHISPER_SANITIZE_THREAD    "whisper: enable thread sanitizer"    OFF)
-option(WHISPER_SANITIZE_ADDRESS   "whisper: enable address sanitizer"   OFF)
-option(WHISPER_SANITIZE_UNDEFINED "whisper: enable undefined sanitizer" OFF)
-
-# extra artifacts
-option(WHISPER_BUILD_TESTS    "whisper: build tests"          ${WHISPER_STANDALONE})
-option(WHISPER_BUILD_EXAMPLES "whisper: build examples"       ${WHISPER_STANDALONE})
-option(WHISPER_BUILD_SERVER   "whisper: build server example" ${WHISPER_STANDALONE})
-
-# 3rd party libs
-option(WHISPER_CURL "whisper: use libcurl to download model from an URL" OFF)
-option(WHISPER_SDL2 "whisper: support for libSDL2" OFF)
 
 if (CMAKE_SYSTEM_NAME MATCHES "Linux")
     option(WHISPER_COMMON_FFMPEG "whisper: examples link with ffmpeg libs in order to decode more audio formats" OFF)
@@ -96,13 +45,6 @@ option(WHISPER_OPENVINO              "whisper: support for OpenVINO"      OFF)
 # Required for relocatable CMake package
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/build-info.cmake)
 
-# override ggml options
-set(GGML_SANITIZE_THREAD    ${WHISPER_SANITIZE_THREAD})
-set(GGML_SANITIZE_ADDRESS   ${WHISPER_SANITIZE_ADDRESS})
-set(GGML_SANITIZE_UNDEFINED ${WHISPER_SANITIZE_UNDEFINED})
-set(GGML_ALL_WARNINGS       ${WHISPER_ALL_WARNINGS})
-set(GGML_FATAL_WARNINGS     ${WHISPER_FATAL_WARNINGS})
-
 # transition helpers
 function (whisper_option_depr TYPE OLD NEW)
     if (${OLD})
@@ -110,19 +52,6 @@ function (whisper_option_depr TYPE OLD NEW)
         set(${NEW} ON)
     endif()
 endfunction()
-
-whisper_option_depr(FATAL_ERROR WHISPER_CUBLAS              GGML_CUDA)
-whisper_option_depr(WARNING     WHISPER_CUDA                GGML_CUDA)
-whisper_option_depr(WARNING     WHISPER_KOMPUTE             GGML_KOMPUTE)
-whisper_option_depr(WARNING     WHISPER_METAL               GGML_METAL)
-whisper_option_depr(WARNING     WHISPER_METAL_EMBED_LIBRARY GGML_METAL_EMBED_LIBRARY)
-whisper_option_depr(WARNING     WHISPER_NATIVE              GGML_NATIVE)
-whisper_option_depr(WARNING     WHISPER_OPENMP              GGML_OPENMP)
-whisper_option_depr(WARNING     WHISPER_RPC                 GGML_RPC)
-whisper_option_depr(WARNING     WHISPER_SYCL                GGML_SYCL)
-whisper_option_depr(WARNING     WHISPER_SYCL_F16            GGML_SYCL_F16)
-whisper_option_depr(WARNING     WHISPER_CCACHE              GGML_CCACHE)
-whisper_option_depr(WARNING     WHISPER_FFMPEG              WHISPER_COMMON_FFMPEG)
 
 if (GGML_CUDA AND NOT MSVC)
     #GGML_CUDA enabled, add the necessary compile options -Wno-deprecated-gpu-targets
@@ -249,49 +178,4 @@ configure_file(cmake/parakeet.pc.in
 install(FILES "${CMAKE_CURRENT_BINARY_DIR}/parakeet.pc"
         DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig)
 
-#
-# programs, examples and tests
-#
-
-if (WHISPER_BUILD_TESTS AND NOT CMAKE_JS_VERSION)
-    include(CTest)
-    add_subdirectory(tests)
-endif ()
-
-if (WHISPER_BUILD_EXAMPLES)
-    add_subdirectory(examples)
-endif()
-
-if (MSVC)
-    set(MSVC_WARNING_FLAGS
-        /wd4101  # Unreferenced local variable
-        /wd4005  # Macro redefinition
-        /wd4065  # switch statement contains 'default' but no 'case' labels
-        /wd4267  # Conversion from 'size_t' to a smaller type, possible loss of data
-        /wd4244  # Conversion from one type to another type, possible loss of ata
-        /wd4805  # Unsafe mix of type
-        /wd4305  # Truncation from 'type1' to 'type2' (often double to float)
-        /wd4996  # Function or variable may be unsafe/deprecated
-    )
-    function(disable_msvc_warnings target_name)
-        if(TARGET ${target_name})
-            target_compile_options(${target_name} PRIVATE ${MSVC_WARNING_FLAGS})
-        endif()
-    endfunction()
-
-    if (WHISPER_BUILD_EXAMPLES)
-        disable_msvc_warnings(whisper)
-        disable_msvc_warnings(common)
-        disable_msvc_warnings(common-sdl)
-        disable_msvc_warnings(lsp)
-        disable_msvc_warnings(wchess-core)
-        disable_msvc_warnings(whisper-command)
-        disable_msvc_warnings(whisper-cli)
-        disable_msvc_warnings(whisper-server)
-        disable_msvc_warnings(whisper-stream)
-        disable_msvc_warnings(whisper-talk-llama)
-        disable_msvc_warnings(whisper-bench)
-        disable_msvc_warnings(quantize)
-        disable_msvc_warnings(vad-speech-segments)
-    endif()
-endif()
+add_subdirectory(examples)
