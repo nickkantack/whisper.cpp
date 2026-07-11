@@ -611,49 +611,45 @@ void high_pass_filter(std::vector<float> & data, float cutoff, float sample_rate
 VadState get_vad_state(
     std::vector<float> & pcmf32, 
     int sample_rate, 
-    int last_ms, 
-    float vad_thold, 
+    int nugget_ms, 
     float freq_thold, 
     bool verbose) {
 
     const int n_samples = pcmf32.size();
-    const int n_samples_last = (sample_rate * last_ms) / 1000;
-
-    if (n_samples_last >= n_samples) {
-        // not enough samples - assume no change
-        return VadState::ActivityContinue;
-    }
+    const int nugget_samples = (sample_rate * nugget_ms) / 1000;
+    const int num_whole_nuggets = n_samples / nugget_samples;
 
     if (freq_thold > 0.0f) {
         high_pass_filter(pcmf32, freq_thold, sample_rate);
     }
 
-    float energy_all  = 0.0f;
-    float energy_last = 0.0f;
+    std::vector<float> nugget_mean_energies;
+    float overall_mean_energy = 0.f;
 
-    for (int i = 0; i < n_samples; i++) {
-        energy_all += fabsf(pcmf32[i]);
-
-        if (i >= n_samples - n_samples_last) {
-            energy_last += fabsf(pcmf32[i]);
+    for (int nugget_index = 0; nugget_index < num_whole_nuggets; nugget_index++) {
+        float energy = 0.f;
+        for (int i = nugget_index * nugget_samples; i < (nugget_index + 1) * nugget_samples; i++) {
+            energy += fabsf(pcmf32[i]);
+        }
+        nugget_mean_energies.push_back(energy / nugget_samples);
+        overall_mean_energy += energy;
+        if (verbose) {
+            fprintf(stderr, "%f\n", energy);
         }
     }
 
-    energy_all /= n_samples;
-    energy_last /= n_samples_last;
+    overall_mean_energy /= num_whole_nuggets;
+
+    float nugget_energy_variance = 0.f;
+    for (int nugget_index = 0; nugget_index < num_whole_nuggets; nugget_index++) {
+        nugget_energy_variance += std::pow((nugget_mean_energies[nugget_index] - overall_mean_energy), 2);
+    }
 
     if (verbose) {
-        fprintf(stderr, "%s: energy_all: %f, energy_last: %f, vad_thold: %f, freq_thold: %f\n", __func__, energy_all, energy_last, vad_thold, freq_thold);
+        fprintf(stderr, "var: %f\n", nugget_energy_variance);
     }
 
-    if (energy_last > vad_thold * energy_all && energy_last > 5E-4) {
-        return VadState::ActivityStart;
-    }
-    if (energy_all > vad_thold * energy_last) {
-        return VadState::ActivityEnd;
-    }
-
-    return VadState::ActivityContinue;
+    return nugget_energy_variance > 90 ? VadState::SpeechPresent : VadState::SpeechAbsent;
 }
 
 bool vad_simple(std::vector<float> & pcmf32, int sample_rate, int last_ms, float vad_thold, float freq_thold, bool verbose) {

@@ -242,14 +242,15 @@ void high_pass_filter(
 enum class VadState {
     ActivityStart,
     ActivityContinue,
-    ActivityEnd
+    ActivityEnd,
+    SpeechPresent,
+    SpeechAbsent
 };
 
 VadState get_vad_state(
     std::vector<float> & pcmf32,
     int   sample_rate,
     int   last_ms,
-    float vad_thold,
     float freq_thold,
     bool  verbose);
 

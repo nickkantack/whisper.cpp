@@ -17,15 +17,13 @@
 
 struct whisper_params {
     int32_t n_threads  = std::min(4, (int32_t) std::thread::hardware_concurrency());
-    int32_t step_ms    = 3000;
-    int32_t length_ms  = 10000;
-    int32_t keep_ms    = 200;
+    int32_t length_ms  = 20000;
     int32_t capture_id = -1;
-    int32_t max_tokens = 32;
+    int32_t max_tokens = 64;
     int32_t audio_ctx  = 0;
     int32_t beam_size  = -1;
 
-    float vad_thold    = 0.6f;
+    float vad_thold    = 0.8f;
     float freq_thold   = 100.0f;
 
     bool translate     = false;
@@ -208,7 +206,7 @@ int main(int argc, char ** argv) {
         Decisions about whether to transcribe are made every 2 seconds.
         continue if not time to make a decision yet.
         */
-        if (time_since_last_inference < decision_interval_ms) {
+        if (time_since_last_inference < decision_interval_ms / 2) {
             std::this_thread::sleep_for(std::chrono::milliseconds(min_ms_between_loops));
             continue;
         }
@@ -226,11 +224,10 @@ int main(int argc, char ** argv) {
 
         bool do_run_inference = false;
         bool was_speaker_cut_off = false;
-        const VadState vad_state = get_vad_state(
-            pcmf32_new, WHISPER_SAMPLE_RATE, decision_interval_ms / 2, params.vad_thold, 
-            params.freq_thold, false);
+        const VadState vad_state = get_vad_state(pcmf32_new, WHISPER_SAMPLE_RATE, 250, params.freq_thold, 
+            false);
 
-        if (!is_speaking && vad_state == VadState::ActivityStart) {
+        if (!is_speaking && vad_state == VadState::SpeechPresent) {
             speech_start_time_cursor = t_now - std::chrono::milliseconds(decision_interval_ms);
             speech_start_approximate_system_time_cursor = system_clock_now -
                 std::chrono::milliseconds(decision_interval_ms);
@@ -240,7 +237,7 @@ int main(int argc, char ** argv) {
             fflush(stdout);
             continue;
         }
-        if (is_speaking && vad_state == VadState::ActivityEnd) {
+        if (is_speaking && vad_state == VadState::SpeechAbsent) {
             next_speech_start_time_cursor = t_now;
             next_speech_start_approximate_system_time_cursor = system_clock_now;
             is_speaking = false;
@@ -325,18 +322,39 @@ int main(int argc, char ** argv) {
 
                     {
                         std::string uuid = make_uuid();
-                        char filename[64];
-                        snprintf(filename, sizeof(filename), "segment_%s.wav", uuid.c_str());
+                        char filename[128];
+                        auto now = std::chrono::steady_clock::now();
+                        auto us = std::chrono::duration_cast<std::chrono::microseconds>(
+                                    now.time_since_epoch()).count();
+
+                        snprintf(filename, sizeof(filename),
+                                "segment_%lld_%s.wav",
+                                static_cast<long long>(us),
+                                uuid.c_str());
                         wavWriter.open(filename, WHISPER_SAMPLE_RATE, 16, 1);
                         wavWriter.write(relevant_pcmf32.data(), relevant_pcmf32.size());
                         wavWriter.close();
-                        std::ofstream out("segment_" + uuid + ".txt");
+                        std::string text_filename =
+                            "segment_" +
+                            std::to_string(static_cast<long long>(us)) +
+                            "_" + uuid +
+                            ".txt";
+                        std::ofstream out(text_filename);
                         out << output;
                     }
 
                     printf("%s", output.c_str());
                     fflush(stdout);
+                } else {
+                    printf("Dumping blank audio\n");
+                    fflush(stdout);
+                    is_speaking = false;
                 }
+            }
+            if (n_segments == 0) {
+                printf("No segments\n");
+                fflush(stdout);
+                is_speaking = false;
             }
         }
 
